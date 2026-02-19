@@ -1,6 +1,7 @@
 ﻿using Microsoft.Data.SqlClient;
 using System;
 using System.Collections.Generic;
+using System.Data;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -100,7 +101,6 @@ public class MemberRepository : IMemberRepository
         var result = await command.ExecuteScalarAsync(cancellationToken);
         return Convert.ToInt32(result);
     }
-
 
     public async Task<Member?> GetByIdAsync(int memberId, CancellationToken cancellationToken = default)
     {
@@ -238,37 +238,37 @@ public class MemberRepository : IMemberRepository
         await using var connection = new SqlConnection(_connectionString);
         await connection.OpenAsync(cancellationToken);
 
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+
         try
         {
-            // 1️ Створення учасника
             var createMemberCmd = new SqlCommand(@"
-            INSERT INTO Members (name, email, join_date)
-            OUTPUT INSERTED.member_id
-            VALUES (@name, @email, @date)", connection);
+                INSERT INTO Members (name, email, join_date)
+                OUTPUT INSERTED.member_id
+                VALUES (@name, @email, @date)", connection, (SqlTransaction)transaction);
 
-            createMemberCmd.Parameters.AddWithValue("@name", member.Name);
-            createMemberCmd.Parameters.AddWithValue("@email", member.Email);
-            createMemberCmd.Parameters.AddWithValue("@date", member.JoinDate);
+            createMemberCmd.Parameters.Add(new SqlParameter("@name", SqlDbType.NVarChar, 200) { Value = member.Name });
+            createMemberCmd.Parameters.Add(new SqlParameter("@email", SqlDbType.NVarChar, 200) { Value = member.Email });
+            createMemberCmd.Parameters.Add(new SqlParameter("@date", SqlDbType.DateTime2) { Value = member.JoinDate });
 
             var memberId = (int)await createMemberCmd.ExecuteScalarAsync(cancellationToken);
 
-            // 2️ Штучна помилка
-            throw new Exception("❌ Помилка під час додавання ролі");
-
-            // 3️ Додавання ролі (не виконається)
             var addRoleCmd = new SqlCommand(@"
-            INSERT INTO Session_Participants (session_id, member_id, role_id)
-            VALUES (@s, @m, @r)", connection);
+                INSERT INTO Session_Participants (session_id, member_id, role_id)
+                VALUES (@s, @m, @r)", connection, (SqlTransaction)transaction);
 
-            addRoleCmd.Parameters.AddWithValue("@s", sessionId);
-            addRoleCmd.Parameters.AddWithValue("@m", memberId);
-            addRoleCmd.Parameters.AddWithValue("@r", roleId);
+            addRoleCmd.Parameters.Add(new SqlParameter("@s", SqlDbType.Int) { Value = sessionId });
+            addRoleCmd.Parameters.Add(new SqlParameter("@m", SqlDbType.Int) { Value = memberId });
+            addRoleCmd.Parameters.Add(new SqlParameter("@r", SqlDbType.Int) { Value = roleId });
 
             await addRoleCmd.ExecuteNonQueryAsync(cancellationToken);
+
+            await transaction.CommitAsync(cancellationToken);
         }
-        catch (Exception ex)
+        catch
         {
-            Console.WriteLine(ex.Message);
+            await transaction.RollbackAsync(cancellationToken);
+            throw;
         }
     }
     public async Task RegisterMemberWithTransactionAsync(
