@@ -1,6 +1,7 @@
 ﻿using Microsoft.Data.SqlClient;
 using System.Security.Cryptography;
 using System.Text;
+using System.Data;
 
 public class MigrationRunner
 {
@@ -33,26 +34,37 @@ public class MigrationRunner
 
             Console.WriteLine($"▶ Applying {name}");
 
-            
             var batches = sqlText.Split(
                 new[] { "\r\nGO\r\n", "\nGO\n", "\r\nGO\n", "\nGO\r\n" },
-                StringSplitOptions.RemoveEmptyEntries
-            );
+                StringSplitOptions.RemoveEmptyEntries);
 
-            foreach (var batch in batches)
+            using var transaction = connection.BeginTransaction();
+
+            try
             {
-                if (string.IsNullOrWhiteSpace(batch)) continue;
-                using var cmd = new SqlCommand(batch, connection);
-                cmd.ExecuteNonQuery();
-            }
+                foreach (var batch in batches)
+                {
+                    if (string.IsNullOrWhiteSpace(batch)) continue;
 
-            SaveMigration(connection, name, hash);
+                    using var cmd = new SqlCommand(batch, connection, transaction);
+                    cmd.CommandTimeout = 600;
+                    cmd.ExecuteNonQuery();
+                }
+
+                SaveMigration(connection, name, hash, transaction);
+                transaction.Commit();
+            }
+            catch
+            {
+                transaction.Rollback();
+                throw;
+            }
         }
     }
 
     private void EnsureMigrationTable(SqlConnection conn)
     {
-        var sql = @"
+        const string sql = @"
         IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'MigrationHistory')
         BEGIN
             CREATE TABLE MigrationHistory (
@@ -62,6 +74,7 @@ public class MigrationRunner
                 AppliedAt DATETIME2 DEFAULT SYSUTCDATETIME()
             )
         END";
+
         using var cmd = new SqlCommand(sql, conn);
         cmd.ExecuteNonQuery();
     }
@@ -69,23 +82,29 @@ public class MigrationRunner
     private Dictionary<string, string> GetAppliedMigrations(SqlConnection conn)
     {
         var dict = new Dictionary<string, string>();
-        var cmd = new SqlCommand("SELECT MigrationName, Hash FROM MigrationHistory", conn);
+        using var cmd = new SqlCommand("SELECT MigrationName, Hash FROM MigrationHistory", conn);
         using var reader = cmd.ExecuteReader();
+
         while (reader.Read())
             dict[reader.GetString(0)] = reader.GetString(1);
+
         return dict;
     }
 
-    private void SaveMigration(SqlConnection conn, string name, string hash)
+    private void SaveMigration(SqlConnection conn, string name, string hash, SqlTransaction tx)
     {
-        var cmd = new SqlCommand(
-            "INSERT INTO MigrationHistory (MigrationName, Hash) VALUES (@n, @h)", conn);
-        cmd.Parameters.AddWithValue("@n", name);
-        cmd.Parameters.AddWithValue("@h", hash);
+        using var cmd = new SqlCommand(
+            "INSERT INTO MigrationHistory (MigrationName, Hash) VALUES (@n, @h)",
+            conn,
+            tx);
+
+        cmd.Parameters.Add(new SqlParameter("@n", SqlDbType.NVarChar, 255) { Value = name });
+        cmd.Parameters.Add(new SqlParameter("@h", SqlDbType.Char, 64) { Value = hash });
+
         cmd.ExecuteNonQuery();
     }
 
-    private string ComputeHash(string sql)
+    private static string ComputeHash(string sql)
     {
         using var sha = SHA256.Create();
         return Convert.ToHexString(sha.ComputeHash(Encoding.UTF8.GetBytes(sql)));
