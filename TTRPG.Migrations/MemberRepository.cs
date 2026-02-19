@@ -15,6 +15,17 @@ public class MemberRepository : IMemberRepository
         _connectionString = connectionString;
     }
 
+    // ---------- COMMON MAPPER (DRY FIX) ----------
+    private static Member MapMember(SqlDataReader reader) => new()
+    {
+        MemberId = reader.GetInt32(0),
+        Name = reader.GetString(1),
+        Nickname = reader.IsDBNull(2) ? null : reader.GetString(2),
+        Email = reader.GetString(3),
+        JoinDate = reader.GetDateTime(4)
+    };
+
+    // ---------- PAGING ----------
     public async Task<IEnumerable<Member>> GetPagedAsync(
         int pageNumber,
         int pageSize,
@@ -49,8 +60,7 @@ public class MemberRepository : IMemberRepository
 
         sql.Append($@"
             ORDER BY {sortColumn} {sortDirection}
-            OFFSET @offset ROWS
-            FETCH NEXT @pageSize ROWS ONLY;");
+            OFFSET @offset ROWS FETCH NEXT @pageSize ROWS ONLY;");
 
         var result = new List<Member>();
 
@@ -58,79 +68,58 @@ public class MemberRepository : IMemberRepository
         await connection.OpenAsync(cancellationToken);
 
         await using var command = new SqlCommand(sql.ToString(), connection);
-        command.Parameters.AddWithValue("@offset", offset);
-        command.Parameters.AddWithValue("@pageSize", pageSize);
+        command.Parameters.Add(new SqlParameter("@offset", SqlDbType.Int) { Value = offset });
+        command.Parameters.Add(new SqlParameter("@pageSize", SqlDbType.Int) { Value = pageSize });
 
         if (!string.IsNullOrWhiteSpace(filterValue))
-            command.Parameters.AddWithValue("@filter", $"%{filterValue}%");
+            command.Parameters.Add(new SqlParameter("@filter", SqlDbType.NVarChar, 255) { Value = $"%{filterValue}%" });
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
 
         while (await reader.ReadAsync(cancellationToken))
-        {
-            result.Add(new Member
-            {
-                MemberId = reader.GetInt32(0),
-                Name = reader.GetString(1),
-                Nickname = reader.IsDBNull(2) ? null : reader.GetString(2),
-                Email = reader.GetString(3),
-                JoinDate = reader.GetDateTime(4)
-            });
-        }
+            result.Add(MapMember(reader));
 
         return result;
     }
 
+    // ---------- CREATE ----------
     public async Task<int> CreateAsync(Member member, CancellationToken cancellationToken = default)
     {
-        var sql = @"
-        INSERT INTO Members (name, nickname, email, join_date)
-        VALUES (@name, @nickname, @email, @join_date);
-
-        SELECT CAST(SCOPE_IDENTITY() AS INT);";
+        const string sql = @"
+            INSERT INTO Members (name, nickname, email, join_date)
+            VALUES (@name, @nickname, @email, @join_date);
+            SELECT CAST(SCOPE_IDENTITY() AS INT);";
 
         await using var connection = new SqlConnection(_connectionString);
         await connection.OpenAsync(cancellationToken);
 
         await using var command = new SqlCommand(sql, connection);
-        command.Parameters.AddWithValue("@name", member.Name);
-        command.Parameters.AddWithValue("@nickname", (object?)member.Nickname ?? DBNull.Value);
-        command.Parameters.AddWithValue("@email", member.Email);
-        command.Parameters.AddWithValue("@join_date", member.JoinDate);
+        command.Parameters.Add(new SqlParameter("@name", SqlDbType.NVarChar, 200) { Value = member.Name });
+        command.Parameters.Add(new SqlParameter("@nickname", SqlDbType.NVarChar, 200) { Value = (object?)member.Nickname ?? DBNull.Value });
+        command.Parameters.Add(new SqlParameter("@email", SqlDbType.NVarChar, 200) { Value = member.Email });
+        command.Parameters.Add(new SqlParameter("@join_date", SqlDbType.DateTime2) { Value = member.JoinDate });
 
-        var result = await command.ExecuteScalarAsync(cancellationToken);
-        return Convert.ToInt32(result);
+        return Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken));
     }
 
+    // ---------- READ ----------
     public async Task<Member?> GetByIdAsync(int memberId, CancellationToken cancellationToken = default)
     {
-        var sql = "SELECT member_id, name, nickname, email, join_date FROM Members WHERE member_id = @id";
+        const string sql = "SELECT member_id, name, nickname, email, join_date FROM Members WHERE member_id = @id";
 
         await using var connection = new SqlConnection(_connectionString);
         await connection.OpenAsync(cancellationToken);
 
         await using var command = new SqlCommand(sql, connection);
-        command.Parameters.AddWithValue("@id", memberId);
+        command.Parameters.Add(new SqlParameter("@id", SqlDbType.Int) { Value = memberId });
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        if (await reader.ReadAsync(cancellationToken))
-        {
-            return new Member
-            {
-                MemberId = reader.GetInt32(0),
-                Name = reader.GetString(1),
-                Nickname = reader.IsDBNull(2) ? null : reader.GetString(2),
-                Email = reader.GetString(3),
-                JoinDate = reader.GetDateTime(4)
-            };
-        }
-
-        return null;
+        return await reader.ReadAsync(cancellationToken) ? MapMember(reader) : null;
     }
 
     public async Task<IEnumerable<Member>> GetAllAsync(CancellationToken cancellationToken = default)
     {
-        var sql = "SELECT member_id, name, nickname, email, join_date FROM Members";
+        const string sql = "SELECT member_id, name, nickname, email, join_date FROM Members";
 
         var members = new List<Member>();
 
@@ -141,23 +130,15 @@ public class MemberRepository : IMemberRepository
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
 
         while (await reader.ReadAsync(cancellationToken))
-        {
-            members.Add(new Member
-            {
-                MemberId = reader.GetInt32(0),
-                Name = reader.GetString(1),
-                Nickname = reader.IsDBNull(2) ? null : reader.GetString(2),
-                Email = reader.GetString(3),
-                JoinDate = reader.GetDateTime(4)
-            });
-        }
+            members.Add(MapMember(reader));
 
         return members;
     }
 
+    // ---------- UPDATE ----------
     public async Task UpdateAsync(Member member, CancellationToken cancellationToken = default)
     {
-        var sql = @"
+        const string sql = @"
             UPDATE Members
             SET name = @name,
                 nickname = @nickname,
@@ -169,67 +150,31 @@ public class MemberRepository : IMemberRepository
         await connection.OpenAsync(cancellationToken);
 
         await using var command = new SqlCommand(sql, connection);
-        command.Parameters.AddWithValue("@name", member.Name);
-        command.Parameters.AddWithValue("@nickname", (object?)member.Nickname ?? DBNull.Value);
-        command.Parameters.AddWithValue("@email", member.Email);
-        command.Parameters.AddWithValue("@join_date", member.JoinDate);
-        command.Parameters.AddWithValue("@id", member.MemberId);
+        command.Parameters.Add(new SqlParameter("@name", SqlDbType.NVarChar, 200) { Value = member.Name });
+        command.Parameters.Add(new SqlParameter("@nickname", SqlDbType.NVarChar, 200) { Value = (object?)member.Nickname ?? DBNull.Value });
+        command.Parameters.Add(new SqlParameter("@email", SqlDbType.NVarChar, 200) { Value = member.Email });
+        command.Parameters.Add(new SqlParameter("@join_date", SqlDbType.DateTime2) { Value = member.JoinDate });
+        command.Parameters.Add(new SqlParameter("@id", SqlDbType.Int) { Value = member.MemberId });
 
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
+    // ---------- DELETE ----------
     public async Task DeleteAsync(int memberId, CancellationToken cancellationToken = default)
     {
-        var sql = "DELETE FROM Members WHERE member_id = @id";
+        const string sql = "DELETE FROM Members WHERE member_id = @id";
 
         await using var connection = new SqlConnection(_connectionString);
         await connection.OpenAsync(cancellationToken);
 
         await using var command = new SqlCommand(sql, connection);
-        command.Parameters.AddWithValue("@id", memberId);
+        command.Parameters.Add(new SqlParameter("@id", SqlDbType.Int) { Value = memberId });
 
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
-    public async Task<IEnumerable<MemberSessionDto>> GetMembersWithSessionsAsync(
-    CancellationToken cancellationToken = default)
-    {
-        var sql = @"
-        SELECT
-            m.member_id,
-            m.name,
-            m.nickname,
-            g.title,
-            s.date
-        FROM Members m
-        JOIN Session_Participants sp ON sp.member_id = m.member_id
-        JOIN Sessions s ON s.session_id = sp.session_id
-        JOIN Games g ON g.game_id = s.game_id
-        ORDER BY s.date DESC;";
 
-        var result = new List<MemberSessionDto>();
-
-        await using var connection = new SqlConnection(_connectionString);
-        await connection.OpenAsync(cancellationToken);
-
-        await using var command = new SqlCommand(sql, connection);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-
-        while (await reader.ReadAsync(cancellationToken))
-        {
-            result.Add(new MemberSessionDto
-            {
-                MemberId = reader.GetInt32(0),
-                MemberName = reader.GetString(1),
-                Nickname = reader.IsDBNull(2) ? null : reader.GetString(2),
-                GameTitle = reader.GetString(3),
-                SessionDate = reader.GetDateTime(4)
-            });
-        }
-
-        return result;
-    }
-
-    public async Task RegisterMemberWithoutTransactionAsync(
+    // ---------- ATOMIC REGISTER (FIXED TRANSACTION) ----------
+    public async Task RegisterMemberAsync(
         Member member,
         int sessionId,
         int roleId,
@@ -271,51 +216,43 @@ public class MemberRepository : IMemberRepository
             throw;
         }
     }
-    public async Task RegisterMemberWithTransactionAsync(
-    Member member,
-    int sessionId,
-    int roleId,
-    CancellationToken cancellationToken = default)
+    public async Task<IEnumerable<MemberSessionDto>> GetMembersWithSessionsAsync(
+        CancellationToken cancellationToken = default)
     {
+        const string sql = @"
+        SELECT
+            m.member_id,
+            m.name,
+            m.nickname,
+            g.title,
+            s.date
+        FROM Members m
+        JOIN Session_Participants sp ON sp.member_id = m.member_id
+        JOIN Sessions s ON s.session_id = sp.session_id
+        JOIN Games g ON g.game_id = s.game_id
+        ORDER BY s.date DESC;";
+
+        var result = new List<MemberSessionDto>();
+
         await using var connection = new SqlConnection(_connectionString);
         await connection.OpenAsync(cancellationToken);
 
-        await using var transaction =
-            (SqlTransaction)await connection.BeginTransactionAsync(cancellationToken);
+        await using var command = new SqlCommand(sql, connection);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
 
-        try
+        while (await reader.ReadAsync(cancellationToken))
         {
-            var createMemberCmd = new SqlCommand(@"
-            INSERT INTO Members (name, email, join_date)
-            OUTPUT INSERTED.member_id
-            VALUES (@name, @email, @date)", connection, transaction);
-
-            createMemberCmd.Parameters.AddWithValue("@name", member.Name);
-            createMemberCmd.Parameters.AddWithValue("@email", member.Email);
-            createMemberCmd.Parameters.AddWithValue("@date", member.JoinDate);
-
-            var memberId = (int)await createMemberCmd.ExecuteScalarAsync(cancellationToken);
-
-            // Штучна помилка
-            throw new Exception("❌ Помилка під час додавання ролі");
-
-            var addRoleCmd = new SqlCommand(@"
-            INSERT INTO Session_Participants (session_id, member_id, role_id)
-            VALUES (@s, @m, @r)", connection, transaction);
-
-            addRoleCmd.Parameters.AddWithValue("@s", sessionId);
-            addRoleCmd.Parameters.AddWithValue("@m", memberId);
-            addRoleCmd.Parameters.AddWithValue("@r", roleId);
-
-            await addRoleCmd.ExecuteNonQueryAsync(cancellationToken);
-
-            await transaction.CommitAsync(cancellationToken);
+            result.Add(new MemberSessionDto
+            {
+                MemberId = reader.GetInt32(0),
+                MemberName = reader.GetString(1),
+                Nickname = reader.IsDBNull(2) ? null : reader.GetString(2),
+                GameTitle = reader.GetString(3),
+                SessionDate = reader.GetDateTime(4)
+            });
         }
-        catch (Exception ex)
-        {
-            Console.WriteLine(ex.Message);
 
-            await transaction.RollbackAsync(cancellationToken);
-        }
+        return result;
     }
+
 }
